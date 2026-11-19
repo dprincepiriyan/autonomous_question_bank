@@ -1,0 +1,3 @@
+2-mark answers: 2-3 crisp lines, start with the definition, no headings.
+13-mark answers: use headings (Introduction, Explanation, Diagram, Advantages/Example, Conclusion).
+Include a Mermaid diagram wherever a diagram is asked for. Use simple English.

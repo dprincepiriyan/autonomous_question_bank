@@ -1,0 +1,31 @@
+CS3451 – INTRODUCTION TO OPERATING SYSTEMS
+QUESTION BANK
+
+UNIT II – PROCESS MANAGEMENT
+
+PART A (2 Marks)
+1. Define a process.
+2. What is a Process Control Block (PCB)? List its contents.
+3. Differentiate between a process and a program.
+4. What is a context switch?
+5. Define a thread.
+6. List the benefits of multithreading.
+7. What is CPU scheduling?
+8. Define throughput and turnaround time.
+9. What is a critical section?
+10. State the three requirements of a solution to the critical-section problem.
+11. Define a semaphore.
+12. What is a deadlock?
+13. List the four necessary conditions for deadlock.
+14. What is meant by a process?
+
+PART B (13 Marks)
+15. Explain the process state diagram with a neat sketch. (13)
+16. (i) Explain the structure of a Process Control Block. (7)
+    (ii) Describe the context switch operation. (6)
+17. Explain the various CPU scheduling algorithms (FCFS, SJF, Priority, Round Robin) with examples. (13)
+18. Explain multithreading models with neat diagrams. (13)
+19. What is the critical-section problem? Explain Peterson's solution. (13)
+20. Explain semaphores and how they solve the producer-consumer problem. (13)
+21. Explain deadlock prevention and the Banker's algorithm for deadlock avoidance. (13)
+22. Explain the architecture of the Linux kernel virtual file system. (13)

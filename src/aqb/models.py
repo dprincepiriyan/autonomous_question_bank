@@ -5,8 +5,9 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Literal
 
-
 QuestionStatus = Literal["pending", "completed"]
+
+NOT_FOUND_MARKER = "[Not found in provided notes]"
 
 
 @dataclass
@@ -26,9 +27,9 @@ class Question:
     def from_dict(cls, data: dict) -> "Question":
         return cls(
             id=str(data["id"]),
-            text=str(data["text"]),
-            marks=int(data["marks"]),
-            topic=str(data.get("topic", "General")),
+            text=str(data["text"]).strip(),
+            marks=int(data.get("marks", 2)),
+            topic=str(data.get("topic") or "General").strip() or "General",
             status=data.get("status", "pending"),
         )
 
@@ -44,16 +45,32 @@ class NoteChunk:
 
 @dataclass
 class TopicImportance:
-    """Aggregated importance score for a lesson topic."""
+    """Aggregated importance score for a lesson topic.
+
+    `question_count` / `total_marks` are always computed in code (never by the LLM),
+    so the numbers are trustworthy. The LLM only contributes `focus_points`.
+    """
 
     topic: str
     question_count: int
     total_marks: int
     priority: Literal["High", "Medium", "Low"]
     rationale: str = ""
+    focus_points: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "TopicImportance":
+        return cls(
+            topic=str(data["topic"]),
+            question_count=int(data.get("question_count", 0)),
+            total_marks=int(data.get("total_marks", 0)),
+            priority=data.get("priority", "Low"),
+            rationale=str(data.get("rationale", "")),
+            focus_points=[str(p) for p in data.get("focus_points", [])],
+        )
 
 
 @dataclass
@@ -65,6 +82,8 @@ class SolvedAnswer:
     question_text: str
     answer_markdown: str
     citations: list[str] = field(default_factory=list)
+    needs_review: bool = False
+    review_note: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -77,6 +96,8 @@ class SolvedAnswer:
             question_text=str(data["question_text"]),
             answer_markdown=str(data["answer_markdown"]),
             citations=list(data.get("citations", [])),
+            needs_review=bool(data.get("needs_review", False)),
+            review_note=str(data.get("review_note", "")),
         )
 
 
@@ -88,8 +109,14 @@ class SessionState:
     style_instructions: str
     questions: list[Question] = field(default_factory=list)
     important_topics: list[TopicImportance] = field(default_factory=list)
+    repeated_questions: list[list[str]] = field(default_factory=list)
+    key_concepts: list[dict] = field(default_factory=list)
     answers: list[SolvedAnswer] = field(default_factory=list)
     batch_count: int = 0
+    notes_sources: list[str] = field(default_factory=list)
+
+    def pending(self) -> list[Question]:
+        return [q for q in self.questions if q.status == "pending"]
 
     def pending_by_marks(self, marks: int) -> list[Question]:
         """Return all pending questions matching a given mark weight."""
@@ -99,14 +126,27 @@ class SessionState:
         """Return True if any question remains unsolved."""
         return any(q.status == "pending" for q in self.questions)
 
+    @property
+    def progress(self) -> tuple[int, int]:
+        done = sum(1 for q in self.questions if q.status == "completed")
+        return done, len(self.questions)
+
+    def ordered_answers(self) -> list[SolvedAnswer]:
+        """Answers ordered by original question order."""
+        order = {q.id: i for i, q in enumerate(self.questions)}
+        return sorted(self.answers, key=lambda a: order.get(a.question_id, len(order)))
+
     def to_dict(self) -> dict:
         return {
             "session_id": self.session_id,
             "style_instructions": self.style_instructions,
             "questions": [q.to_dict() for q in self.questions],
             "important_topics": [t.to_dict() for t in self.important_topics],
+            "repeated_questions": self.repeated_questions,
+            "key_concepts": self.key_concepts,
             "answers": [a.to_dict() for a in self.answers],
             "batch_count": self.batch_count,
+            "notes_sources": self.notes_sources,
         }
 
     @classmethod
@@ -115,7 +155,10 @@ class SessionState:
             session_id=str(data["session_id"]),
             style_instructions=str(data.get("style_instructions", "")),
             questions=[Question.from_dict(q) for q in data.get("questions", [])],
-            important_topics=[TopicImportance(**t) for t in data.get("important_topics", [])],
+            important_topics=[TopicImportance.from_dict(t) for t in data.get("important_topics", [])],
+            repeated_questions=[list(g) for g in data.get("repeated_questions", [])],
+            key_concepts=list(data.get("key_concepts", [])),
             answers=[SolvedAnswer.from_dict(a) for a in data.get("answers", [])],
             batch_count=int(data.get("batch_count", 0)),
+            notes_sources=list(data.get("notes_sources", [])),
         )

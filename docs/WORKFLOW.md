@@ -1,6 +1,6 @@
 # Agentic Workflow
 
-This document details the exact end-to-end execution flow of the **Autonomous Question Bank** agent.
+This document details the end-to-end execution lifecycle of the **Autonomous Question Bank** agent across both the CLI (`aqb`) and Streamlit web app (`app.py`).
 
 ---
 
@@ -9,74 +9,78 @@ This document details the exact end-to-end execution flow of the **Autonomous Qu
 ```mermaid
 sequenceDiagram
     actor User
-    participant CLI as Onboarding / CLI
+    participant UI as CLI / Streamlit UI
     participant Orch as Orchestrator
-    participant Ret as Notes Retriever
-    participant LLM as Solver / Analyzer LLM
+    participant Ret as BM25 Retriever
+    participant LLM as Retrying LLM Client
 
-    User->>CLI: Provide Question Bank, Notes, Optional Style Instructions
-    CLI->>Orch: Start Session
-    Orch->>Ret: Chunk & Index Study Notes
-    Orch->>LLM: Parse Question Bank into Structured List (2M / 13M)
-    LLM-->>Orch: JSON Question Queue
+    User->>UI: Provide Question Bank, Notes, Optional Style Instructions
+    UI->>Orch: prepare()
+    Orch->>Ret: Load & Chunk Notes (page-aware chunk IDs)
+    Orch->>LLM: Parse Question Bank (sliced JSON + heuristic fallback)
+    LLM-->>Orch: Structured Question Queue (2M / 13M / other)
 
-    Orch->>LLM: Analyze Topic Frequency & Mark Weightage
-    LLM-->>Orch: Ranked Important Topics
-    Orch-->>User: Display Important Topics to Focus On
+    Orch->>Orch: Compute Topic Mark Weightage, Key Concepts & Repeated Qs
+    Orch->>LLM: Enrich Topics with Study Focus Points (best effort)
+    Orch->>Orch: Save Initial Checkpoint (state.json + notes_corpus.json)
+    Orch-->>UI: Display Important Topics to Focus On
 
-    loop While Pending Questions Exist
-        Orch->>Orch: Pop Batch (10-12 x 2M OR 5-6 x 13M)
-        Orch->>Ret: Query Relevant Note Chunks for Batch
-        Ret-->>Orch: Top-K Grounded Chunks + Citations
-        Orch->>LLM: Solve Batch (Notes + Style Instructions + Grounding Rules)
-        LLM-->>Orch: Solved Batch Answers
-        Orch-->>User: Stream Batch Reply
-        Orch->>Orch: Mark Batch Completed & Checkpoint State
+    loop solve_iter() while pending questions exist
+        Orch->>Orch: next_batch(): 10-12 short OR 5-6 long (single mark weight)
+        Orch->>Ret: Full Context (<=60k chars) or Per-Question Top-K BM25
+        Ret-->>Orch: Grounded Note Chunks
+        Orch->>LLM: Solve Batch (Notes + Style Rules + Grounding Constraints)
+        LLM-->>Orch: JSON Batch Answers (auto-repaired / split if truncated)
+        opt Missing IDs in reply
+            Orch->>LLM: Retry omitted question(s) once
+        end
+        opt --verify enabled and long-answer batch
+            Orch->>LLM: Fact-check answers against source chunks
+        end
+        Orch->>Orch: Validate Citations, Flag Review Items, Atomic Checkpoint
+        Orch-->>UI: Stream Batch Result + Update Progress
     end
 
-    Orch->>Orch: Compile Important Topics + All Answers
-    Orch-->>User: Output Final Answer Key (.md)
+    Orch->>Orch: export() -> final_answer_key.md (.docx / .pdf)
+    Orch-->>UI: Present Final Answer Key & Downloads
 ```
 
 ---
 
-## Step-by-Step Breakdown
+## Stage-by-Stage Execution
 
-### Step 1: Startup Prompts
-At the very beginning of a run, the agent prompts the user for:
-1. **Question Bank path** (or pasted text).
-2. **Study Material / Notes path** (or pasted text).
-3. **Optional Answer Style Instructions** (e.g., *"Use bullet points, include Mermaid diagrams for 13-markers, keep 2-markers to 2–3 sentences."*).
+### Stage 1: Onboarding & Input Loading
+At startup, the app auto-loads `.env` and prompts for:
+1. **Question Bank** — one or more `.pdf`, `.docx`, `.txt`, `.md` files (or pasted text).
+2. **Study Material / Notes** — one or more `.pdf`, `.docx`, `.pptx`, `.txt`, `.md` files (or pasted text).
+3. **Optional Answer Style Instructions** — formatting/tone rules (never override grounding rules).
 
-### Step 2: Question Parsing & Classification
-The parser extracts every question into a normalized schema:
-- `id`: Question identifier (`Q1`, `Q2`, ...)
-- `marks`: `2` or `13` (extensible to other mark weights)
-- `topic`: Inferred sub-topic/lesson area
-- `text`: Full question text
-- `status`: `pending` | `completed`
+The raw question bank and notes corpus are persisted inside `outputs/<session_id>/` so the session is completely self-contained and resumable later.
 
-### Step 3: Important Topics Extraction
-Before or during solving, the orchestrator aggregates mark weightage by topic:
-- `total_marks = sum(q.marks for q in topic_questions)`
-- `question_count = len(topic_questions)`
-- Ranks topics into **High Priority**, **Medium Priority**, and **Quick-Revision (2M-heavy)** so the user knows where to focus study time.
+### Stage 2: Hybrid Question Parsing
+- **Auto mode (default)**: Slices long banks along question/header boundaries, extracts questions via JSON-mode LLM calls, and compares against the deterministic heuristic parser (`PART A/B/C`, `UNIT`, sub-part mark summation, `(OR)` alternatives). If the LLM drops >30% of questions or fails, the heuristic parse is used so questions are never silently lost.
+- If the parsed questions lack fine-grained topics (e.g., all under one unit), the orchestrator assigns each question to its closest matching heading from the study notes.
 
-### Step 4: Constant Batch-Solving Loop
-The orchestrator loops until `pending_questions == 0`:
-1. **Select Batch Type**:
-   - Process all pending **2-markers** in batches of **10–12** (configurable, default `10`).
-   - Process all pending **13-markers** in batches of **5–6** (configurable, default `5`).
-2. **Retrieve Context**:
-   - Retrieve the most relevant note chunks for the questions in the current batch.
-3. **Generate Batch Reply**:
-   - Format the prompt with the batch questions, retrieved note chunks, and user's optional style instructions.
-   - Emit the batch reply immediately to the user.
-4. **Checkpoint**:
-   - Save solved answers and updated `status: completed` to disk (`outputs/<session_id>/state.json`).
+### Stage 3: High-Yield Topics & Exam Insights
+Before solving begins, the agent outputs:
+- **Ranked Important Topics** (`High` / `Medium` / `Low`) ordered strictly by computed mark weightage and question count, enriched with sub-concept focus points.
+- **Most Frequently Examined Concepts** (mark-weighted terms/bigrams appearing across multiple questions).
+- **Repeated Questions** (near-duplicates detected via Jaccard similarity).
 
-### Step 5: Final Answer Key Compilation
-Once all batches finish, the orchestrator writes `outputs/<session_id>/final_answer_key.md` containing:
-1. Lesson **Important Topics & Focus Guide**
-2. **Part A: 2-Mark Questions & Answers** (ordered by ID)
-3. **Part B: 13-Mark Questions & Answers** (ordered by ID)
+### Stage 4: Checkpointed Batch-Solving Loop
+`solve_iter()` loops until `state.has_pending()` is `False` (or `--max-batches` is reached):
+1. **Select Batch**: Short answers first (`10–12` per turn), then long answers (`5–6` per turn), keeping one mark value per batch.
+2. **Ground Context**: Sends all chunks if total notes are `≤ 60,000` characters; otherwise runs per-question BM25 retrieval so no question in the batch is starved of context.
+3. **Generate & Recover**:
+   - Retries transient API errors (429/5xx/timeouts) with exponential backoff + jitter.
+   - Repairs common JSON formatting errors (fences, prose wrappers, trailing commas, raw newlines) and re-asks once if invalid.
+   - Splits the batch in half and recurses if a large batch still produces unusable output.
+   - Retries any question ID omitted by the model.
+4. **Validate & Checkpoint**: Strips hallucinated chunk IDs, marks uncited or `[Not found in provided notes]` answers with `needs_review=True`, optionally runs the long-answer verifier pass, atomically replaces `state.json`, and saves `batches/batch_NNN.md`.
+
+### Stage 5: Resume & Final Export
+- Interrupting at any point (`Ctrl+C`, API quota hit, browser close) preserves all completed batches; resume via `aqb --resume <session_id>` or the Streamlit **Saved sessions** sidebar.
+- `export()` compiles the **Important Topics**, **Repeated Questions**, **Part A/B/... Answer Keys**, and **Needs Review** summary into:
+  - `outputs/<session_id>/final_answer_key.md`
+  - `outputs/<session_id>/final_answer_key.docx` (with `--docx` or Web UI)
+  - `outputs/<session_id>/final_answer_key.pdf` (with `--pdf` or Web UI)

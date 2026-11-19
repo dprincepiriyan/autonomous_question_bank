@@ -8,6 +8,7 @@ build/
 dist/
 .venv/
 venv/
+.pytest_cache/
 
 # Env & secrets
 .env
